@@ -17,10 +17,20 @@ import yfinance as yf
 load_dotenv()
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+    ],
+    allow_credentials=True,
+    allow_methods=['POST'],
+    allow_headers=['*'],
+)
 
 model = ChatOpenAI(
-    model = 'c1/openai/gpt-5/v-20250930',
-    base_url = 'https://api.thesys.dev/v1/embed/'
+    model='c1/openai/gpt-5/v-20250930',
+    base_url='https://api.thesys.dev/v1/embed/',
 )
 
 checkpointer = InMemorySaver()
@@ -28,30 +38,38 @@ checkpointer = InMemorySaver()
 
 @tool('get_stock_price', description='A function that returns the current stock price based on a ticker symbol.')
 def get_stock_price(ticker: str):
-    print('get_stock_price tool is being used')
     stock = yf.Ticker(ticker)
-    return stock.history()['Close'].iloc[-1]
+    history = stock.history(period='5d')
+    if history.empty:
+        return f'No price data found for {ticker.upper()}.'
+    return {'ticker': ticker.upper(), 'close': float(history['Close'].iloc[-1])}
 
 
 @tool('get_historical_stock_price', description='A function that returns the current stock price over time based on a ticker symbol and a start and end date.')
 def get_historical_stock_price(ticker: str, start_date: str, end_date: str):
-    print('get_historical_stock_price tool is being used')
     stock = yf.Ticker(ticker)
-    return stock.history(start=start_date, end=end_date).to_dict()
+    history = stock.history(start=start_date, end=end_date)
+    if history.empty:
+        return f'No historical price data found for {ticker.upper()} in that date range.'
+    return history[['Open', 'High', 'Low', 'Close', 'Volume']].round(2).to_json(date_format='iso')
 
 
 @tool('get_balance_sheet', description='A function that returns the balance sheet based on a ticker symbol.')
 def get_balance_sheet(ticker: str):
-    print('get_balance_sheet tool is being used')
     stock = yf.Ticker(ticker)
-    return stock.balance_sheet
+    balance_sheet = stock.balance_sheet
+    if balance_sheet.empty:
+        return f'No balance sheet data found for {ticker.upper()}.'
+    return balance_sheet.to_json(date_format='iso')
 
 
 @tool('get_stock_news', description='A function that returns news based on a ticker symbol.')
 def get_stock_news(ticker: str):
-    print('get_stock_news tool is being used')
     stock = yf.Ticker(ticker)
-    return stock.news
+    news = stock.news
+    if not news:
+        return f'No recent news found for {ticker.upper()}.'
+    return news
 
 
 
@@ -81,13 +99,21 @@ async def chat(request: RequestObject):
     def generate():
         for token, _ in agent.stream(
             {'messages': [
-                SystemMessage('You are a stock analysis assistant. You have the ability to get real-time stock prices, historical stock prices (given a date range), news and balance sheet data for a given ticker symbol.'),
-                HumanMessage(request.prompt.content)
+                SystemMessage(content='You are a stock analysis assistant. Use the available tools to answer with current prices, historical prices, balance sheet data, and recent news. Clearly distinguish retrieved facts from your interpretation.'),
+                HumanMessage(content=request.prompt.content),
             ]},
             stream_mode='messages',
-            config=config
+            config=config,
         ):
-            yield token.content
+            content = token.content
+            if isinstance(content, str):
+                yield content
+            elif content:
+                yield ''.join(
+                    block.get('text', '')
+                    for block in content
+                    if isinstance(block, dict)
+                )
 
     return StreamingResponse(generate(), media_type='text/event-stream',
                              headers={
