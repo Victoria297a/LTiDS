@@ -1,21 +1,24 @@
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-import os
+from html import escape
+
+import logging
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from langchain.agents import create_agent
-from langchain.tools import tool
-from langchain.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-import yfinance as yf
+from llm import create_model
+from stock_tools import TOOLS, SYSTEM_PROMPT
 
 load_dotenv()
+
+logger = logging.getLogger('uvicorn.error')
 
 app = FastAPI()
 app.add_middleware(
@@ -29,62 +32,16 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-gateway_api_key = os.getenv('THESYS_API_KEY') or os.getenv('OPENAI_API_KEY')
-if not gateway_api_key:
-    raise RuntimeError(
-        'Missing THESYS_API_KEY. Add the AI Gateway key to backend_ai/.env.'
-    )
-
-model = ChatOpenAI(
-    model='c1/openai/gpt-5/v-20250930',
-    base_url='https://api.thesys.dev/v1/embed/',
-    api_key=gateway_api_key,
-)
+model = create_model()
 
 checkpointer = InMemorySaver()
-
-
-@tool('get_stock_price', description='A function that returns the current stock price based on a ticker symbol.')
-def get_stock_price(ticker: str):
-    stock = yf.Ticker(ticker)
-    history = stock.history(period='5d')
-    if history.empty:
-        return f'No price data found for {ticker.upper()}.'
-    return {'ticker': ticker.upper(), 'close': float(history['Close'].iloc[-1])}
-
-
-@tool('get_historical_stock_price', description='A function that returns the current stock price over time based on a ticker symbol and a start and end date.')
-def get_historical_stock_price(ticker: str, start_date: str, end_date: str):
-    stock = yf.Ticker(ticker)
-    history = stock.history(start=start_date, end=end_date)
-    if history.empty:
-        return f'No historical price data found for {ticker.upper()} in that date range.'
-    return history[['Open', 'High', 'Low', 'Close', 'Volume']].round(2).to_json(date_format='iso')
-
-
-@tool('get_balance_sheet', description='A function that returns the balance sheet based on a ticker symbol.')
-def get_balance_sheet(ticker: str):
-    stock = yf.Ticker(ticker)
-    balance_sheet = stock.balance_sheet
-    if balance_sheet.empty:
-        return f'No balance sheet data found for {ticker.upper()}.'
-    return balance_sheet.to_json(date_format='iso')
-
-
-@tool('get_stock_news', description='A function that returns news based on a ticker symbol.')
-def get_stock_news(ticker: str):
-    stock = yf.Ticker(ticker)
-    news = stock.news
-    if not news:
-        return f'No recent news found for {ticker.upper()}.'
-    return news
-
 
 
 agent = create_agent(
     model = model,
     checkpointer = checkpointer,
-    tools = [get_stock_price, get_historical_stock_price, get_balance_sheet, get_stock_news]
+    tools = TOOLS,
+    system_prompt = SYSTEM_PROMPT,
 )
 
 
@@ -105,23 +62,23 @@ async def chat(request: RequestObject):
     config = {'configurable': {'thread_id': request.threadId}}
 
     def generate():
-        for token, _ in agent.stream(
-            {'messages': [
-                SystemMessage(content='You are a stock analysis assistant. Use the available tools to answer with current prices, historical prices, balance sheet data, and recent news. Clearly distinguish retrieved facts from your interpretation.'),
-                HumanMessage(content=request.prompt.content),
-            ]},
-            stream_mode='messages',
-            config=config,
-        ):
-            content = token.content
-            if isinstance(content, str):
-                yield content
-            elif content:
-                yield ''.join(
-                    block.get('text', '')
-                    for block in content
-                    if isinstance(block, dict)
-                )
+        # C1Chat parses an XML-like stream; <custommarkdown> renders plain Markdown,
+        # so text from a regular (non-C1) model is wrapped in it and HTML-escaped.
+        yield '<custommarkdown>'
+        try:
+            for token, _ in agent.stream(
+                {'messages': [HumanMessage(content=request.prompt.content)]},
+                stream_mode='messages',
+                config=config,
+            ):
+                # Skip tool results; only stream the model's own answer
+                if isinstance(token, AIMessage) and token.text:
+                    yield escape(token.text, quote=False)
+        except Exception as e:
+            # Surface model errors (bad key, rate limit) in the chat instead of an empty reply
+            logger.error('Model request failed: %r', e)
+            yield escape(f'Error from the AI model: {getattr(e, "message", None) or e}', quote=False)
+        yield '</custommarkdown>'
 
     return StreamingResponse(generate(), media_type='text/event-stream',
                              headers={
