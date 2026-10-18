@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
+import os
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,9 +29,16 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
+gateway_api_key = os.getenv('THESYS_API_KEY') or os.getenv('OPENAI_API_KEY')
+if not gateway_api_key:
+    raise RuntimeError(
+        'Missing THESYS_API_KEY. Add the AI Gateway key to backend_ai/.env.'
+    )
+
 model = ChatOpenAI(
     model='c1/openai/gpt-5/v-20250930',
     base_url='https://api.thesys.dev/v1/embed/',
+    api_key=gateway_api_key,
 )
 
 checkpointer = InMemorySaver()

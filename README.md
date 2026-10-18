@@ -6,7 +6,9 @@ The stock assistant uses a Vite/React chat frontend and a FastAPI/LangChain
 backend. The agent can retrieve current prices, historical prices, balance
 sheets, and recent news through `yfinance`.
 
-1. Copy `backend_ai/.env.example` to `backend_ai/.env` and add your API key.
+1. Copy `backend_ai/.env.example` to `backend_ai/.env` and add your
+   `THESYS_API_KEY` from the AI Gateway. The backend still accepts the old
+   `OPENAI_API_KEY` name during migration.
 2. Start the backend:
 
    ```powershell
